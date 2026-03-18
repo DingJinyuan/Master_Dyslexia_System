@@ -20,17 +20,17 @@ const emit = defineEmits(['back']);
 const router = useRouter()
 const route = useRoute()
 
-// 返回上一页（原有逻辑）
+// 修改：返回按钮跳转到/upload页面
 const handleBack = () => {
-  emit('back')
+  // 先触发back事件（保留原有事件逻辑），再跳转
+  //emit('back')
+  router.push('/upload')
 }
 
-// 组件内直接跳转沉浸式页面（核心）
+// 保持不变：沉浸式按钮跳转到原有沉浸式页面
 const goToImmersive = () => {
-  // 跳转到沉浸式路由 /chenjinshi/文档ID
   router.push({
     path: `/chenjinshi/${props.documentId}`,
-    // 可选：记录跳转来源（方便沉浸式页面返回）
     query: { from: route.fullPath }
   })
 }
@@ -39,10 +39,11 @@ const goToImmersive = () => {
 <template>
   <div class="top-bar">
     <div class="top-left">
+      <!-- 返回按钮：点击跳转到/upload -->
       <button class="back-btn" @click="handleBack">←</button>
       <div class="book-title">{{ title }}</div>
     </div>
-    <!-- 点击直接触发组件内的跳转方法 -->
+    <!-- 沉浸式按钮：保持原有跳转逻辑 -->
     <button class="immersive-btn" @click="goToImmersive">
       沉浸式阅读模式
     </button>

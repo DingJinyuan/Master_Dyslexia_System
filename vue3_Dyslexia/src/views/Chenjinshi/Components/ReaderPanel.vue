@@ -1,9 +1,7 @@
 <script setup>
-// 移除 defineProps/defineEmits 导入，Vue3 setup语法糖内置
-import { ref, watch, onMounted, onUnmounted } from 'vue';
+import { ref, watch, onMounted } from 'vue';
 import FontSelector from '@/views/ReaderView/Components/FontSelector.vue';
 
-// 直接使用 defineProps（无需导入）
 const props = defineProps({
   config: {
     type: Object,
@@ -25,22 +23,23 @@ const props = defineProps({
     type: Boolean,
     default: false
   },
-  content: {
-    type: String,
-    default: ''
+  // 新增：接收防抖状态，控制按钮禁用
+  isGenerating: {
+    type: Boolean,
+    default: false
   }
 });
 
-// 直接使用 defineEmits（无需导入）
 const emit = defineEmits([
   'open-modal',
   'open-comic-modal',
   'optimize-text',
-  'restore-text'
+  'restore-text',
+  'calculate-readability',
+  'generate-summary' // 新增：触发生成摘要
 ]);
 
 const readerPanelRef = ref(null);
-const panelContainerRef = ref(null);
 const panelVisible = ref(false);
 const CONTENT_MAX_WIDTH = 800;
 
@@ -144,14 +143,10 @@ onMounted(() => {
   document.addEventListener('mousemove', handleMouseMovePanel);
   loadFonts();
 });
-
-onUnmounted(() => {
-  document.removeEventListener('mousemove', handleMouseMovePanel);
-});
 </script>
 
 <template>
-  <div class="reader-panel-container" ref="panelContainerRef">
+  <div class="reader-panel-container">
     <div class="reader-panel" ref="readerPanelRef">
       <div class="panel-header">🛠️ 阅读设置</div>
 
@@ -188,6 +183,12 @@ onUnmounted(() => {
         </div>
 
         <button class="func-btn" @click="emit('open-modal', 'guide')">📖 阅读指南</button>
+        <button class="func-btn" @click="emit('calculate-readability')">📊 可读性评分</button>
+        <!-- 生成摘要按钮：增加防抖禁用逻辑 -->
+        <button class="func-btn" @click="emit('generate-summary')" :disabled="isGenerating"
+          :style="isGenerating ? { opacity: 0.7, cursor: 'not-allowed' } : {}">
+          📝 生成文本摘要
+        </button>
       </div>
 
       <!-- 漫画生成 -->
@@ -207,6 +208,7 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* 保留原有样式，无修改 */
 .reader-panel-container {
   position: fixed;
   top: 0;
@@ -250,7 +252,6 @@ onUnmounted(() => {
   margin-bottom: 12px;
 }
 
-/* 按钮样式 */
 .func-btn,
 .tool-btn,
 .comic-btn {
@@ -289,7 +290,6 @@ onUnmounted(() => {
   background: #ea580c;
 }
 
-/* 工具控制样式 */
 .tool-control {
   margin: 4px 0 12px;
   padding: 0 4px;
@@ -320,7 +320,6 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-/* 阅读辅助工具样式 */
 .reader-tools-container {
   position: fixed;
   top: 0;
@@ -376,7 +375,6 @@ onUnmounted(() => {
   background: rgba(0, 0, 0, 0.7);
 }
 
-/* 滚动条样式 */
 .reader-panel::-webkit-scrollbar {
   width: 4px;
 }

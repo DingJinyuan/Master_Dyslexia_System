@@ -9,7 +9,7 @@ const httpInstance = axios.create({
   //配置基地址
   baseURL: 'http://localhost:8000/api/v1',
   //配置超时时间
-  timeout: 5000,
+  timeout: 30000,
 })
 // axios请求拦截器 --请求发送到服务器之前执行的逻辑，可对请求参数、请求头做统一处理
 httpInstance.interceptors.request.use(

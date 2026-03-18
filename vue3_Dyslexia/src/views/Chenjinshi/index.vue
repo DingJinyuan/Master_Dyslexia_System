@@ -1,35 +1,43 @@
 <script setup>
-import { ref, watch, onMounted, onUnmounted } from 'vue'
-import { useRoute } from 'vue-router'
+// Vue3 setup语法糖中，defineProps/defineEmits 是内置宏，无需导入
+import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
-import { documentsDetailAPI } from '@/apis/documents.js'
-import { documentsDetail_structuredAPI } from '@/apis/documents.js'
+// 导入API
+import { documentsDetailAPI, documentsDetail_structuredAPI } from '@/apis/documents.js'
+import { wordLookupAPI, posTaggingAPI } from '@/apis/nlp.js'
 
+// 导入组件
+import ReaderHeader from './Components/ReaderHeader.vue'
 import ReaderContent from './Components/ReaderContent.vue'
 import ReaderModal from './Components/ReaderModal.vue'
 import ReaderPanel from './Components/ReaderPanel.vue'
 import ComicPanel from './Components/ReaderCommic.vue'
 import VoicePanel from './Components/VoicePanel.vue'
+import WordTooltip from './Components/ReaderWordTooltip.vue'
 
+// 路由相关
 const route = useRoute()
-// 修复1：给路由参数加默认值，避免 undefined
+const router = useRouter()
 const documentId = ref(route.params.documents_id || 1)
 
+// 状态管理
 const loading = ref(true)
 const error = ref('')
-
 const documentData = ref(null)
 const structuredData = ref(null)
-// 修复2：初始值设为占位符，确保渲染有内容
 const originalText = ref('加载中...')
-const originalTextContent = ref('')
+const taggedText = ref('加载中...')
+// ✅ 新增：词性标注加载状态（区分文档加载和标注加载）
+const posTaggingLoading = ref(false)
+const posTaggingError = ref('')
 
+// 配置项
 const config = ref({
   selectedFont: 'system-ui',
   fontSize: 22,
   lineHeight: 2.2,
   letterSpacing: 1.5,
-  selectedTheme: 'warm',
   selectedColor: '#ffeb3b',
   highlighted: false,
   enableRuler: false,
@@ -38,20 +46,23 @@ const config = ref({
   focusHeight: 220
 })
 
+// 弹窗状态
 const modalState = ref({
   showGuide: false,
   showSummary: false
 })
 
+// 文本优化
 const isTextOptimized = ref(false)
 
-// 漫画：只控制显示/隐藏，没有弹窗逻辑
+// 漫画相关
 const comicState = ref({
   visible: false,
   generating: false,
   list: []
 })
 
+// 语音朗读
 const ttsState = ref({
   playing: false,
   showPanel: false,
@@ -62,36 +73,87 @@ const ttsState = ref({
   isPlaying: false
 })
 
+// 划词翻译
 const tooltip = ref({
-  show: false,
-  word: '',
-  pos: '',
-  desc: '',
-  left: 0,
-  top: 0
+  visible: false,
+  wordInfo: {},
+  position: { left: 0, top: 0 }
 })
 
+// 朗读相关变量
 let audio = null
 let syncMarks = ref([])
 let highlightTimer = null
 
-// 加载文档
+// ✅ 重构：单独抽离词性标注逻辑，支持重试
+// 重构：单独抽离词性标注逻辑，支持重试
+const fetchPosTagging = async (textContent) => {
+  if (!textContent || textContent.includes('异常') || textContent.includes('无可用')) {
+    taggedText.value = textContent.replace(/\n/g, '<br><br>')
+    return
+  }
+
+  posTaggingLoading.value = true
+  posTaggingError.value = ''
+
+  try {
+    // 给接口请求加超时控制（10秒）
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10000)
+
+    // 调用词性标注API
+    const posRes = await posTaggingAPI(textContent, {
+      signal: controller.signal
+    })
+
+    clearTimeout(timeoutId)
+
+    // ✅ 关键修改：放宽校验逻辑，只要有返回就渲染
+    console.log('接口原始返回：', posRes) // 先看一眼真实结构
+    if (posRes) {
+      // 假设接口直接返回 tokens 数组，而不是 { data: { tokens } }
+      const tokens = Array.isArray(posRes) ? posRes : posRes.data || posRes.tokens || []
+      if (tokens.length > 0) {
+        taggedText.value = convertPosTagsToHtml(tokens)
+        posTaggingLoading.value = false // 成功后结束加载
+        console.log('词性标注成功：', tokens)
+      } else {
+        throw new Error('接口返回了空的标注结果')
+      }
+    } else {
+      throw new Error('接口返回为空')
+    }
+  } catch (posErr) {
+    posTaggingError.value = posErr.message
+    console.warn('词性标注接口调用提示：', posErr)
+
+    // ✅ 只有真正的业务错误才降级，预检/超时不降级
+    if (posErr.name !== 'AbortError' && !posErr.message.includes('preflight')) {
+      taggedText.value = textContent.replace(/\n/g, '<br><br>')
+      posTaggingLoading.value = false
+    } else {
+      // 超时/预检：继续等待，不结束加载
+      taggedText.value = '词性标注接口响应中...（请勿刷新）'
+    }
+  }
+}
+
+// 加载文档核心逻辑
 const loadDocumentData = async () => {
   try {
     loading.value = true
     error.value = ''
-    console.log('【调试】加载文档ID：', documentId.value)
 
+    // 1. 获取文档基础信息
     const docRes = await documentsDetailAPI(documentId.value)
     documentData.value = docRes.data
 
+    // 2. 获取结构化文本内容
     const structRes = await documentsDetail_structuredAPI(documentId.value)
-    // ✅ 核心修复：接口返回的是 { data: 文档对象 }，所以要取 .data
     structuredData.value = structRes.data || structRes
-    console.log('【调试】structuredData：', structuredData.value)
 
+    // 提取纯文本
     let textContent = ''
-    // 现在直接访问 structuredData.value.blocks
     if (Array.isArray(structuredData.value?.blocks)) {
       const textBlocks = structuredData.value.blocks
         .filter(block =>
@@ -101,73 +163,87 @@ const loadDocumentData = async () => {
         )
         .map(block => block.text_content)
 
-      if (textBlocks.length > 0) {
-        textContent = textBlocks.join('\n\n')
-        console.log('【调试】提取到文本块：', textBlocks)
-      } else {
-        textContent = '接口返回了 blocks，但没有可显示的文本内容'
-      }
+      textContent = textBlocks.length > 0 ? textBlocks.join('\n\n') : '无可用文本内容'
     } else {
-      textContent = `结构化数据格式异常，blocks 不是数组。当前 structuredData：${JSON.stringify(structuredData.value, null, 2)}`
-    }
-
-    if (!textContent || textContent.trim() === '') {
-      textContent = '暂无可显示的文档内容，请检查文档解析结果'
+      textContent = '文档格式异常'
     }
 
     originalText.value = textContent
-    originalTextContent.value = textContent
-    console.log('【调试】最终文本：', textContent)
+    taggedText.value = '正在请求词性标注接口...'
+
+    // 3. 调用词性标注（单独抽离，异步执行，不阻塞文档加载）
+    await fetchPosTagging(textContent)
 
   } catch (err) {
-    error.value = `加载文档失败：${err.message || '未知错误'}`
+    error.value = `加载失败：${err.message || '未知错误'}`
     originalText.value = error.value
-    console.error('【错误】', err)
+    taggedText.value = error.value
   } finally {
     loading.value = false
   }
 }
-// 主题切换（保留背景设置，移除子组件样式操作）
-const changeTheme = (newTheme) => {
-  const themeMap = { warm: '#fff9e6', dark: '#1f2937', white: '#ffffff', blue: '#eff6ff' }
-  document.body.style.background = themeMap[newTheme] || '#fff9e6'
+
+// 转换词性标注结果为带颜色的HTML
+const convertPosTagsToHtml = (tokens) => {
+  if (!tokens || tokens.length === 0) return ''
+
+  let html = ''
+  tokens.forEach(token => {
+    html += `<span style="background-color: ${token.color || '#4A90D9'}30; padding: 0 2px; border-radius: 2px; margin: 0 1px;">${token.word}</span> `
+  })
+  return html
 }
 
-// 划词逻辑（保持不变）
-const handleMouseUp = () => {
-  const selection = window.getSelection()
-  const word = selection.toString().trim()
-  if (!word || word.length >= 20) {
-    tooltip.value.show = false
-    return
-  }
-  const wordInfo = getWordDefinition(word)
-  const rect = selection.getRangeAt(0).getBoundingClientRect()
-  tooltip.value = {
-    show: true,
-    word,
-    pos: wordInfo.pos,
-    desc: wordInfo.desc,
-    left: rect.left + window.scrollX,
-    top: rect.bottom + window.scrollY + 10
+// 划词查询逻辑
+const handleMouseUp = async (e) => {
+  if (!e) return
+
+  try {
+    await nextTick()
+    tooltip.value.visible = false
+
+    const selection = window.getSelection()
+    const word = selection.toString().trim()
+
+    if (!word || word.length >= 20 || word.includes('\n')) return
+
+    const res = await wordLookupAPI(word)
+    if (res?.success) {
+      const rect = selection.getRangeAt(0).getBoundingClientRect()
+      tooltip.value = {
+        visible: true,
+        wordInfo: res,
+        position: {
+          left: rect.left + window.scrollX,
+          top: rect.bottom + window.scrollY + 10
+        }
+      }
+    }
+  } catch (err) {
+    tooltip.value.visible = false
   }
 }
 
-const getWordDefinition = (word) => {
-  const dict = {
-    "Reading": { pos: "n. 阅读", desc: "通过视觉获取文字信息并理解含义。" },
-    "Power": { pos: "n. 力量；能力", desc: "体力、智力或影响力。" },
-    "视野": { pos: "n. 视野", desc: "眼界与认知范围。" }
+// 返回上一页
+const handleBack = () => {
+  if (route.query.from) {
+    router.push(route.query.from)
+  } else {
+    router.go(-1)
   }
-  return dict[word] || { pos: "未知", desc: "暂无释义" }
 }
 
-// 语音面板逻辑（保持不变）
-const toggleVoicePanel = (e) => {
-  e.stopPropagation()
+// 切换语音面板
+const handleToggleVoice = () => {
   ttsState.value.showPanel = !ttsState.value.showPanel
 }
 
+// 打开指南弹窗
+const handleOpenGuide = () => {
+  modalState.value.showGuide = true
+}
+
+// 语音速度调整
 const onSpeedInput = () => {
   ttsState.value.speedDisplay = ttsState.value.speed
   if (audio && ttsState.value.isPlaying) {
@@ -175,15 +251,16 @@ const onSpeedInput = () => {
   }
 }
 
-// 高亮逻辑（增加内容校验）
+// 清空朗读高亮
 const clearHighlights = () => {
   if (highlightTimer) clearInterval(highlightTimer)
-  if (originalText.value && !originalText.value.includes('加载中') && !originalText.value.includes('失败')) {
-    const el = document.querySelector('.document-content')
-    if (el) el.innerHTML = originalText.value.replace(/\n/g, '<br><br>')
+  const el = document.querySelector('.document-content')
+  if (el && taggedText.value) {
+    el.innerHTML = taggedText.value
   }
 }
 
+// 停止朗读
 const stopReading = () => {
   if (audio) {
     audio.pause()
@@ -194,19 +271,29 @@ const stopReading = () => {
   clearHighlights()
 }
 
+// 朗读同步高亮
 const syncWordHighlight = () => {
   highlightTimer = setInterval(() => {
     if (!ttsState.value.isPlaying || !audio) return
+
     const ms = audio.currentTime * 1000
     const mark = syncMarks.value.find(m => ms >= m.start_ms && ms <= m.end_ms)
+
     if (mark) {
       clearHighlights()
       const el = document.querySelector('.document-content')
-      if (el) el.innerHTML = el.innerHTML.replaceAll(mark.word, `<span class="highlighted-word">${mark.word}</span>`)
+      if (el) {
+        const highlightedHtml = taggedText.value.replace(
+          new RegExp(`(${mark.word})`, 'g'),
+          `<span style="background-color: #ffeb3b !important; padding: 0 2px; border-radius: 2px;">$1</span>`
+        )
+        el.innerHTML = highlightedHtml
+      }
     }
   }, 30)
 }
 
+// 开始/暂停朗读
 const toggleStart = async () => {
   if (ttsState.value.isPlaying) {
     audio?.pause()
@@ -217,7 +304,7 @@ const toggleStart = async () => {
       audio = new Audio('mock_audio/female_soft_1_0.mp3')
       audio.onended = stopReading
       syncMarks.value = [
-        { index: 0, word: "Assignment", start_ms: 0, end_ms: 280 },
+        { index: 0, word: "string", start_ms: 0, end_ms: 280 },
         { index: 1, word: "2", start_ms: 280, end_ms: 560 },
         { index: 2, word: "The", start_ms: 560, end_ms: 700 },
         { index: 3, word: "Power", start_ms: 700, end_ms: 950 },
@@ -225,6 +312,7 @@ const toggleStart = async () => {
         { index: 5, word: "Reading", start_ms: 1050, end_ms: 1400 }
       ]
     }
+
     audio.playbackRate = parseFloat(ttsState.value.speed)
     await audio.play()
     ttsState.value.isPlaying = true
@@ -233,34 +321,30 @@ const toggleStart = async () => {
   }
 }
 
-// 文本优化（通过修改config让子组件响应）
+// 文本优化/恢复
 const optimizeText = () => {
   isTextOptimized.value = true
   config.value.letterSpacing = 2
-  config.value.wordSpacing = 1.8
   config.value.lineHeight = 2.5
 }
 
 const restoreText = () => {
   isTextOptimized.value = false
   config.value.letterSpacing = 1.5
-  config.value.wordSpacing = 1.2
   config.value.lineHeight = 2.2
 }
 
-// 漫画逻辑（保持不变）
+// 生成漫画
 const generateComics = async () => {
   comicState.value.visible = true
   comicState.value.generating = true
+
   try {
-    await new Promise(r => setTimeout(r, 3000))
+    await new Promise(r => setTimeout(r, 2000))
     comicState.value.list = [
-      { id: 1, imageUrl: 'https://picsum.photos/800/400?random=1', caption: '场景1：阅读开启知识' },
-      { id: 2, imageUrl: 'https://picsum.photos/800/400?random=2', caption: '场景2：知识拓宽视野' },
-      { id: 3, imageUrl: 'https://picsum.photos/800/400?random=3', caption: '场景3：沉浸式阅读' }
+      { id: 1, imageUrl: 'https://picsum.photos/800/400?random=1', caption: '场景1' },
+      { id: 2, imageUrl: 'https://picsum.photos/800/400?random=2', caption: '场景2' }
     ]
-  } catch (err) {
-    console.error(err)
   } finally {
     comicState.value.generating = false
   }
@@ -268,36 +352,53 @@ const generateComics = async () => {
 
 const regenerateComics = () => generateComics()
 
-// 弹窗控制（保持不变）
+// 弹窗控制
 const openModal = (type) => {
   if (type === 'guide') modalState.value.showGuide = true
   if (type === 'summary') modalState.value.showSummary = true
 }
+
 const closeModal = (type) => {
   if (type === 'guide') modalState.value.showGuide = false
   if (type === 'summary') modalState.value.showSummary = false
 }
 
-// 监听主题变化
-watch(() => config.value.selectedTheme, changeTheme, { immediate: true })
+// ✅ 监听词性标注加载状态，更新后强制重新渲染
+watch([posTaggingLoading, taggedText], () => {
+  // 触发组件重新渲染
+  nextTick(() => {
+    const contentEl = document.querySelector('.document-content')
+    if (contentEl) {
+      contentEl.innerHTML = taggedText.value
+    }
+  })
+})
 
-// 监听路由参数变化（防止页面不刷新时参数更新）
+// 监听路由变化刷新文档
 watch(() => route.params.documents_id, (newVal) => {
   if (newVal) {
     documentId.value = newVal
-    loadDocumentData() // 重新加载数据
+    loadDocumentData()
   }
 })
 
+// 生命周期
 onMounted(async () => {
-  // 优先加载数据
   await loadDocumentData()
 
-  // 点击关闭tooltip/语音面板
+  // 全局事件监听
   document.addEventListener('click', (e) => {
-    if (tooltip.value.show && !e.target.closest('.word-tooltip')) tooltip.value.show = false
+    if (tooltip.value.visible && !e.target.closest('.word-tooltip')) {
+      tooltip.value.visible = false
+    }
     if (ttsState.value.showPanel && !e.target.closest('.voice-panel') && e.target.id !== 'playBtn') {
       ttsState.value.showPanel = false
+    }
+  })
+
+  document.addEventListener('mouseup', async (e) => {
+    if (e.target.closest('.document-content')) {
+      await handleMouseUp(e)
     }
   })
 })
@@ -305,26 +406,14 @@ onMounted(async () => {
 onUnmounted(() => {
   stopReading()
   if (highlightTimer) clearInterval(highlightTimer)
-  document.body.style.background = ''
 })
 </script>
 
 <template>
-  <div class="immersive-reader" :class="config.selectedTheme">
-    <!-- 顶部导航 -->
-    <header class="reader-header">
-      <div class="header-left">
-        <button class="back-btn" @click="$router.back()">←</button>
-        <h1 class="document-title">{{ documentData?.original_filename || '沉浸式阅读' }}</h1>
-      </div>
-      <div class="header-right">
-        <button class="icon-btn" id="playBtn" :class="{ active: ttsState.playing }"
-          @click="toggleVoicePanel">🎧</button>
-        <VoicePanel :tts-state="ttsState" @toggle-start="toggleStart" @stop-reading="stopReading"
-          @speed-input="onSpeedInput" />
-        <button class="icon-btn" @click="openModal('guide')">❓</button>
-      </div>
-    </header>
+  <div class="immersive-reader">
+    <!-- 头部组件 -->
+    <ReaderHeader :document-title="documentData?.original_filename || '沉浸式阅读'" :is-playing="ttsState.playing"
+      @back="handleBack" @toggle-voice="handleToggleVoice" @open-guide="handleOpenGuide" />
 
     <!-- 加载状态 -->
     <div v-if="loading" class="loading-container">
@@ -338,31 +427,36 @@ onUnmounted(() => {
       <button class="retry-btn" @click="loadDocumentData">重新加载</button>
     </div>
 
-    <!-- 阅读主体（核心修复：调整布局，确保内容容器占满空间） -->
+    <!-- 主内容区 -->
     <main v-else class="reading-container">
-      <!-- 左侧漫画触发区 -->
+      <!-- 漫画面板触发区 -->
       <div class="comic-hover-trigger" @mouseenter="comicState.visible = true" @mouseleave="comicState.visible = false">
         <ComicPanel :comics="comicState.list" :visible="comicState.visible" :generating="comicState.generating"
           @regenerate-comic="regenerateComics" />
       </div>
 
-      <!-- 划词tooltip -->
-      <div v-if="tooltip.show" class="word-tooltip" :style="{ left: `${tooltip.left}px`, top: `${tooltip.top}px` }">
-        <div class="word">{{ tooltip.word }}</div>
-        <span class="pos">{{ tooltip.pos }}</span>
-        <span class="desc">{{ tooltip.desc }}</span>
+      <!-- ✅ 增加词性标注加载状态提示 -->
+      <div v-if="posTaggingLoading" class="pos-tagging-loading" style="text-align: center; padding: 20px; color: #666;">
+        <div class="loading-spinner" style="margin: 0 auto;"></div>
+        <p style="margin-top: 10px;">词性标注接口响应中...（接口较慢，请勿刷新）</p>
       </div>
 
-      <!-- 核心修复：移除loading绑定，确保内容始终渲染 + 增加key强制更新 -->
-      <ReaderContent :key="documentId + (isTextOptimized ? 'optimized' : 'normal')" :content="originalText"
-        :config="config" :is-plain-text="true" @mouseup="handleMouseUp" />
+      <!-- 核心阅读内容（词性标注后的文本） -->
+      <ReaderContent
+        :key="documentId + (isTextOptimized ? 'optimized' : 'normal') + (posTaggingLoading ? 'tagging' : 'tagged')"
+        :content="taggedText" :config="config" :is-plain-text="false" :loading="loading"
+        :posTaggingLoading="posTaggingLoading" @mouseup="handleMouseUp" />
+
+      <!-- 划词翻译弹窗 -->
+      <WordTooltip v-model:visible="tooltip.visible" :word-info="tooltip.wordInfo" :position="tooltip.position"
+        :font-config="config" />
     </main>
 
-    <!-- 右侧工具栏 -->
+    <!-- 右侧设置面板 -->
     <ReaderPanel :config="config" :is-text-optimized="isTextOptimized" @open-modal="openModal"
       @open-comic-modal="generateComics" @optimize-text="optimizeText" @restore-text="restoreText" />
 
-    <!-- 弹窗 -->
+    <!-- 弹窗组件 -->
     <ReaderModal :modal-state="modalState" @close-modal="closeModal">
       <template #summary-content>
         <p style="margin:16px 0;line-height:1.7;">
@@ -370,113 +464,34 @@ onUnmounted(() => {
         </p>
       </template>
     </ReaderModal>
+
+    <!-- 语音朗读面板 -->
+    <VoicePanel :tts-state="ttsState" @toggle-start="toggleStart" @stop-reading="stopReading"
+      @speed-input="onSpeedInput" />
   </div>
 </template>
 
 <style scoped>
+/* 全局容器 - 固定米黄色背景 */
 .immersive-reader {
   min-height: 100vh;
-  transition: background 0.3s;
+  background: #fff9e6;
   display: flex;
   flex-direction: column;
 }
 
-/* 主题背景 */
-.immersive-reader.warm {
-  background: #fff9e6;
-}
-
-.immersive-reader.dark {
-  background: #1f2937;
-}
-
-.immersive-reader.white {
-  background: #ffffff;
-}
-
-.immersive-reader.blue {
-  background: #eff6ff;
-}
-
-/* 顶部导航 */
-.reader-header {
-  background: #fff;
-  padding: 12px 24px;
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  border-bottom: 1px solid #e5e7eb;
-  position: sticky;
-  top: 0;
-  z-index: 100;
-}
-
-.header-left {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-}
-
-.back-btn {
-  width: 36px;
-  height: 36px;
-  border: none;
-  background: transparent;
-  font-size: 20px;
-  cursor: pointer;
-  border-radius: 8px;
-}
-
-.back-btn:hover {
-  background: #f3f4f6;
-}
-
-.document-title {
-  font-size: 18px;
-  font-weight: 600;
-  max-width: 300px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.header-right {
-  display: flex;
-  gap: 12px;
-  position: relative;
-}
-
-.icon-btn {
-  width: 36px;
-  height: 36px;
-  border: none;
-  background: #f9fafb;
-  border-radius: 8px;
-  cursor: pointer;
-}
-
-.icon-btn:hover {
-  background: #e5e7eb;
-}
-
-.icon-btn.active {
-  background: #2563eb;
-  color: #fff;
-}
-
-/* 核心修复：阅读容器布局，确保占满剩余空间 */
+/* 阅读内容容器 */
 .reading-container {
   flex: 1;
   position: relative;
   padding: 40px 24px;
-  max-width: 1000px;
+  max-width: 1200px;
   margin: 0 auto;
   width: 100%;
-  /* 修复flex布局导致的内容挤压 */
-  display: block;
+  box-sizing: border-box;
 }
 
-/* 漫画触发区 */
+/* 漫画面板触发区 */
 .comic-hover-trigger {
   position: fixed;
   left: 0;
@@ -490,7 +505,7 @@ onUnmounted(() => {
   width: 320px;
 }
 
-/* 加载/错误样式 */
+/* 加载/错误状态样式 */
 .loading-container,
 .error-container {
   flex: 1;
@@ -513,7 +528,7 @@ onUnmounted(() => {
 
 @keyframes spin {
   100% {
-    transform: rotate(360deg)
+    transform: rotate(360deg);
   }
 }
 
@@ -531,35 +546,42 @@ onUnmounted(() => {
   cursor: pointer;
 }
 
-/* 划词tooltip */
-.word-tooltip {
+/* 词性标注加载提示 */
+.pos-tagging-loading {
   position: absolute;
-  background: #fff;
-  border-radius: 10px;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
-  padding: 12px 16px;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   z-index: 10;
-  min-width: 200px;
+  background: rgba(255, 249, 230, 0.9);
+  border-radius: 8px;
+  width: 80%;
 }
 
-.word {
-  font-weight: 600;
-  margin-bottom: 4px;
+/* 词性标注文本样式 */
+:deep(.document-content) {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+  cursor: text !important;
+  line-height: 1.8;
+  font-size: 18px;
+  min-height: 60vh;
+  padding: 20px 0;
 }
 
-.pos {
-  color: #6b7280;
-  margin-right: 8px;
+:deep(.document-content span) {
+  user-select: text !important;
+  -webkit-user-select: text !important;
 }
 
-.desc {
-  color: #374151;
-  line-height: 1.5;
-}
+/* 响应式适配 */
+@media (max-width: 768px) {
+  .reading-container {
+    padding: 20px 16px;
+  }
 
-/* 高亮文字样式 */
-.highlighted-word {
-  background: #ffeb3b;
-  border-radius: 2px;
+  .pos-tagging-loading {
+    width: 90%;
+  }
 }
 </style>

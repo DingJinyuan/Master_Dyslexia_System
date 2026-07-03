@@ -1,0 +1,56 @@
+# ============================================================
+# pip install -r requirements.txt
+# 安装完之后执行:  python setup_models.py
+# 国内网络加镜像:  pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+# ============================================================
+
+# ---- Web framework ----
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
+# ---- Database ----
+sqlalchemy>=2.0.35
+
+# ---- Validation & Config ----
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+python-multipart>=0.0.9
+email-validator>=2.2.0
+
+# ---- MCP (思维导图) ----
+mcp>=1.0.0
+
+# ---- Auth ----
+bcrypt>=4.3.0
+python-jose[cryptography]>=3.3.0
+
+# ---- AI / LLM ----
+openai>=1.0.0
+
+# ---- Refine pipeline (LangGraph 多 Agent 迭代) ----
+langgraph>=0.2.0
+rouge-score
+bert-score
+nltk
+numpy
+
+# ---- NLP (词性标注 + 拼音 + 可读性) ----
+jieba
+spacy>=3.8.0
+pypinyin
+textstat
+
+# ---- TTS (多引擎热备) ----
+edge-tts
+gtts
+pyttsx3
+
+# ---- PDF 解析 + OCR ----
+pymupdf>=1.24.10
+easyocr
+
+# ---- HTTP ----
+httpx>=0.27.0
+
+# ---- Test ----
+requests

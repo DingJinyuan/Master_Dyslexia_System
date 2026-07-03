@@ -1,6 +1,6 @@
 # 优读 EASE — 阅读障碍辅助系统 技术文档
 
-> 版本：v1.0 | 日期：2026-07-04 | 作者：jacky
+> 版本：v1.0 | 日期：2026-07-04 | 作者：jacky | 最后更新：Pinia 缓存、全音色预热、主题切换、自动滚动
 
 ---
 
@@ -27,16 +27,18 @@
 
 | 功能 | 说明 |
 |---|---|
-| 文档上传与解析 | 支持 PDF/PNG/JPEG/WEBP，自动提取文本和图片 |
-| 词性标注 | 中文（jieba）+ 英文（spaCy），颜色编码展示 |
-| TTS 语音朗读 | 多引擎热备（edge-tts 有道 gTTS pyttsx3） |
-| 划词翻译 | 选中单词自动查词（英文 Free Dictionary + 中文自建词典） |
-| 可读性评分 | 中英文双算法，多维度量化文本难度 |
-| 文本优化 | DeepSeek 多轮迭代改写，简化句式/词汇，面向阅读障碍者 |
-| 文本摘要 | AI 摘要，支持简短/标准/详细三种长度 |
-| 思维导图 | DeepSeek 提取大纲 + MCP markmap 渲染 HTML |
-| 阅读辅助工具 | 阅读障碍尺、焦点引导屏、字体/主题切换、自动滚动 |
-| 用户管理 | JWT 认证 + 管理员审批流程 |
+| 文档上传与解析 | 支持 PDF/PNG/JPEG/WEBP，4 层降级提取+乱码校验 |
+| 词性标注 | 中文 jieba + 英文 spaCy，8 色编码，可显隐切换 |
+| TTS 语音朗读 | edge-tts 为主，4 音色全量预热+缓存，切换秒播 |
+| 划词翻译 | 选中即查，英文 Free Dictionary + 中文自建词典 |
+| 可读性评分 | 中英文双算法，英文四次方根映射（学术论文 1.7→36） |
+| AI 文本优化 | LangGraph 迭代改写，口语化/短句/分段，纯本地评估 |
+| AI 摘要 | 简短/标准/详细，强制原语种输出 |
+| 思维导图 | DeepSeek 大纲+MCP markmap，3 次重试，fastly CDN |
+| 阅读辅助 | 阅读尺、焦点屏、4 主题切换、自动滚动 |
+| 图文模式 | 共存（嵌入）+分离（侧栏），一键切换 |
+| 预热缓存 | Pinia 持久化，优化/摘要/TTS/导图进文章即生成，刷新不丢 |
+| 用户管理 | JWT 认证 + 管理员审批，退出清缓存 |
 
 ---
 
@@ -342,7 +344,7 @@ pre_evaluate(基线分) -> [FullRefineAgent|SummaryAgent] -> judge(评估)
 
 #### DyslexiaEvaluator（质量评估器）
 
-纯本地计算，零 API 调用，每次<100ms。三维度等权重(1/3)：
+纯本地计算，零 API 调用，每次 <100ms。三维度等权重(1/3)，已移除叙事维度：
 
 **阅读有效性**：FRE + FKGL + 平均句长归一化，各1/3。衡量句法复杂度。
 
@@ -478,6 +480,33 @@ watch(() => config.selectedTheme, (val) => {
 4. **思维导图预热**：调用 mindmap API，HTML URL 缓存
 
 点击播放/优化/摘要/导图 → 优先查缓存 → 命中即秒开，不命中则实时生成。
+
+### 4.10 Pinia 缓存存储
+
+缓存统一由 `cacheStore.js`（Pinia + persistedstate）管理，不再手动操作 localStorage：
+
+```javascript
+// stores/cacheStore.js
+docCache: {
+  [docId]: {
+    refine: '...',          // 全文改写结果
+    summary: { ... },       // 摘要结果
+    mindmap: 'http://...',  // 思维导图 URL
+    tts: {                  // 各音色音频 URL
+      'zh-CN-XiaoxiaoNeural': '/static/tts/...',
+      'zh-CN-YunxiNeural': '/static/tts/...',
+      ...
+    }
+  }
+}
+```
+
+| 操作 | 行为 |
+|---|---|
+| 进入文章 | 从 store 读缓存 → 秒开 |
+| 预热完成 | 写入 store → 自动持久化 localStorage |
+| 用户登出 | `clearAll()` → 清空全部缓存 |
+| 刷新页面 | Pinia 自动从 localStorage 恢复 |
 
 ---
 

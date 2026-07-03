@@ -7,6 +7,7 @@ import BookSection from './Components/BookSection.vue'
 import SettingsModal from './Components/SettingsModal.vue' // 系统设置弹窗
 import AdminModal from './Components/AdminModal.vue'
 import { useUserStore } from '@/stores/userStore'
+import { useCacheStore } from '@/stores/cacheStore'
 
 // 新增：路由实例
 const router = useRouter()
@@ -74,7 +75,9 @@ const handleLogout = (e) => {
   e.preventDefault() // 阻止a标签默认锚点跳转
   try {
     const userStore = useUserStore()
-    // 1. 清空Pinia存储（根据实际store结构调整）
+    const cacheStore = useCacheStore()
+    // 1. 清空缓存 + Pinia存储
+    cacheStore.clearAll()
     // 方式1：调用store的重置方法（推荐，需在userStore中定义）
     if (userStore.resetStore) {
       userStore.resetStore()

@@ -7,6 +7,7 @@ import { documentsDetailAPI, documentsDetail_structuredAPI } from '@/apis/docume
 import { wordLookupAPI, posTaggingAPI, readabilityScoreAPI, refineTextAPI } from '@/apis/nlp.js'
 import { generateMindmapAPI } from '@/apis/mindmap.js'
 import { ttsGenerateAPI, getTTSVoicesAPI } from '@/apis/tts.js'
+import { useCacheStore } from '@/stores/cacheStore'
 
 // 导入组件（新增ReadabilityModal）
 import ReaderHeader from './Components/ReaderHeader.vue'
@@ -130,10 +131,8 @@ const ttsPreWarmed = ref(false)
 const preWarmedAudioMap = ref({})  // { voiceName: audioUrl }
 const ttsPreWarming = ref(false)
 
-// 文本优化 & 摘要 & 思维导图预热缓存
-const refineCached = ref(null)   // full_refine 结果
-const summaryCached = ref(null)  // summary 结果
-const mindmapCached = ref(null)  // 思维导图 HTML URL
+// 缓存 store（Pinia 持久化，刷新不丢）
+const cacheStore = useCacheStore()
 const cachePreWarming = ref(false)
 
 // --- 核心方法 ---
@@ -172,7 +171,11 @@ const loadDocumentData = async () => {
     taggedText.value = error.value
   } finally {
     loading.value = false
-    // 后台预热：TTS + 文本优化 + 摘要
+    // 从 Pinia 缓存读取（持久化，刷新不丢）
+    const cached = cacheStore.getDocCache(documentId.value)
+    if (cached.refine) refinedPlainText.value = cached.refine
+    if (cached.tts) { preWarmedAudioMap.value = cached.tts; ttsPreWarmed.value = true }
+    // 后台预热更新缓存
     preWarmTTS()
     preWarmRefine()
   }
@@ -191,12 +194,18 @@ const preWarmTTS = async () => {
         ttsGenerateAPI({ text, voice, rate: '+0%', pitch: '+0Hz' }).catch(() => null)
       )
     )
-    const map = {}
+    const docId = documentId.value
+    let count = 0
     voices.forEach((v, i) => {
-      if (results[i]?.success) map[v] = resolveAudioUrl(results[i].audioUrl)
+      if (results[i]?.success) {
+        const url = resolveAudioUrl(results[i].audioUrl)
+        cacheStore.setTTS(docId, v, url)
+        count++
+      }
     })
-    preWarmedAudioMap.value = map
-    ttsPreWarmed.value = Object.keys(map).length > 0
+    ttsPreWarmed.value = count > 0
+    // 同步到本地 map 用于现有逻辑
+    preWarmedAudioMap.value = cacheStore.getDocCache(docId).tts || {}
   } catch (e) {
     console.warn('TTS 预热失败:', e)
   } finally {
@@ -216,15 +225,16 @@ const preWarmRefine = async () => {
       refineTextAPI({ original_text: text, mode: 'summary', summary_length: '标准', max_iterations: 1 }).catch(() => null),
       generateMindmapAPI({ text, max_depth: 4 }).catch(() => null)
     ])
+    const docId = documentId.value
     if (refineRes?.refined_text) {
-      refineCached.value = refineRes.refined_text
+      cacheStore.setRefine(docId, refineRes.refined_text)
       refinedPlainText.value = refineRes.refined_text
     }
-    if (summaryRes?.refined_text) summaryCached.value = summaryRes
+    if (summaryRes?.refined_text) cacheStore.setSummary(docId, summaryRes)
     if (mindmapRes?.success) {
       const base = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000'
       const url = mindmapRes.html_url
-      mindmapCached.value = url.startsWith('http') ? url : `${base}/${url.replace(/^\//, '')}`
+      cacheStore.setMindmap(docId, url.startsWith('http') ? url : `${base}/${url.replace(/^\//, '')}`)
     }
   } catch (e) {
     console.warn('预热失败:', e)
@@ -419,18 +429,28 @@ const textOptimizeLoading = ref(false)
 const cachedOriginalTagged = ref('') // 缓存原始词性标注结果，用于恢复
 
 const optimizeText = async () => {
+  if (isTextOptimized.value) return  // 已优化，不重复
   const text = originalText.value
   if (!text || text.includes('加载中') || text.includes('无可用') || text.includes('文档格式异常')) return
+
+  // 缓存命中 → 秒开
+  const cached = cacheStore.getDocCache(documentId.value)
+  if (cached.refine) {
+    cachedOriginalTagged.value = taggedText.value
+    refinedPlainText.value = cached.refine
+    taggedText.value = `<div class="refined-text">${cached.refine.replace(/\n/g, '<br><br>')}</div>`
+    isTextOptimized.value = true
+    return
+  }
+
+  // 无缓存 → 实时调用
   textOptimizeLoading.value = true
   try {
     cachedOriginalTagged.value = taggedText.value
-    // 优先用缓存
-    let refined = refineCached.value
-    if (!refined) {
-      const res = await refineTextAPI({ original_text: text, mode: 'full_refine', max_iterations: 1 })
-      refined = res?.refined_text
-    }
+    const res = await refineTextAPI({ original_text: text, mode: 'full_refine', max_iterations: 1 })
+    const refined = res?.refined_text
     if (refined) {
+      cacheStore.setRefine(documentId.value, refined)
       refinedPlainText.value = refined
       taggedText.value = `<div class="refined-text">${refined.replace(/\n/g, '<br><br>')}</div>`
       isTextOptimized.value = true
@@ -522,17 +542,14 @@ const generateSummary = async (length) => {
   }
 
   try {
-    // 优先用缓存（仅"标准"长度命中缓存）
-    let resultData = (length === '标准' && summaryCached.value) ? summaryCached.value : null
-    if (!resultData) {
-      resultData = await refineTextAPI({ original_text: originalTextVal, mode: 'summary', summary_length: length });
+    let resultData
+    const cached = cacheStore.getDocCache(documentId.value)
+    if (length === '标准' && cached.summary) {
+      resultData = cached.summary  // 缓存秒开
+    } else {
+      resultData = await refineTextAPI({ original_text: originalTextVal, mode: 'summary', summary_length: length })
     }
-
-    summaryState.value = {
-      ...summaryState.value,
-      loading: false,
-      result: resultData
-    };
+    summaryState.value = { ...summaryState.value, loading: false, result: resultData }
   } catch (err) {
     // 错误处理
     const errMsg = err.response?.data?.detail?.[0]?.msg || err.message || '生成摘要失败';
@@ -582,8 +599,9 @@ const generateMindmap = async () => {
   mindmapState.value = { visible: true, loading: true, error: '', htmlUrl: '' }
   try {
     // 优先用缓存
-    if (mindmapCached.value) {
-      mindmapState.value = { visible: true, loading: false, error: '', htmlUrl: mindmapCached.value }
+    const cached = cacheStore.getDocCache(documentId.value)
+    if (cached.mindmap) {
+      mindmapState.value = { visible: true, loading: false, error: '', htmlUrl: cached.mindmap }
       return
     }
     const res = await generateMindmapAPI({ text, max_depth: 4 })
